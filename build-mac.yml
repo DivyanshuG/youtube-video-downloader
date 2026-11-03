@@ -1,0 +1,142 @@
+name: Build macOS app
+
+# Push a tag such as v1.0.1 to build the app and attach it to a GitHub Release.
+# Or open the Actions tab, pick "Build macOS app" and click "Run workflow" to build a test copy
+# (it appears under "Artifacts" at the bottom of the run page, no release is created).
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  APP_NAME: YouTube Video Downloader
+
+jobs:
+  build:
+    name: Build (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.optional }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest        # Apple Silicon (M1 and newer)
+            arch: arm64
+            ffmpeg_arch: arm64
+            cloudflared_arch: arm64
+            optional: false
+          - os: macos-15-intel      # Intel Macs
+            arch: x86_64
+            ffmpeg_arch: amd64
+            cloudflared_arch: amd64
+            optional: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.19.0'
+
+      - name: Install Python packages
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+
+      - name: Fetch helper tools (ffmpeg, ffprobe, node, cloudflared)
+        run: |
+          mkdir -p build-bin
+          cp "$(which node)" build-bin/node
+          for tool in ffmpeg ffprobe; do
+            if curl -fsSL --retry 3 "https://ffmpeg.martin-riedl.de/redirect/latest/macos/${{ matrix.ffmpeg_arch }}/release/${tool}.zip" -o "${tool}.zip" \
+               && unzip -o -q "${tool}.zip" -d build-bin; then
+              chmod +x "build-bin/${tool}"
+            else
+              echo "::warning::Could not download ${tool}. The app will fall back to a Homebrew copy on the user's Mac."
+            fi
+          done
+          CF_VERSION=$(python -c "import json;print(json.load(open('vendor/cloudflared-release.json'))['version'])")
+          if curl -fsSL --retry 3 "https://github.com/cloudflare/cloudflared/releases/download/${CF_VERSION}/cloudflared-darwin-${{ matrix.cloudflared_arch }}.tgz" -o cloudflared.tgz \
+             && tar -xzf cloudflared.tgz -C build-bin cloudflared; then
+            chmod +x build-bin/cloudflared
+          else
+            echo "::warning::Could not download cloudflared. 'Connect AI' will be unavailable."
+          fi
+          ls -la build-bin
+
+      - name: Make the app icon
+        run: |
+          mkdir Sonika.iconset
+          for s in 16 32 128 256 512; do
+            sips -z $s $s assets/app-icon.png --out Sonika.iconset/icon_${s}x${s}.png
+            sips -z $((s*2)) $((s*2)) assets/app-icon.png --out Sonika.iconset/icon_${s}x${s}@2x.png
+          done
+          iconutil -c icns Sonika.iconset -o Sonika.icns
+
+      - name: Build the app
+        env:
+          SONIKA_BIN_DIR: ${{ github.workspace }}/build-bin
+          SONIKA_ICON: ${{ github.workspace }}/Sonika.icns
+        run: |
+          pyinstaller --noconfirm --clean Sonika-mac.spec
+          codesign --force --deep --sign - "dist/$APP_NAME.app"
+          codesign --verify --deep --strict "dist/$APP_NAME.app"
+
+      - name: Smoke test the built app
+        run: |
+          # The background queue starts, finds nothing to do and exits by itself. This proves that
+          # the frozen app can import everything it needs.
+          timeout 60 "dist/$APP_NAME.app/Contents/MacOS/Sonika" --queue
+          FFMPEG=$(find "dist/$APP_NAME.app" -name ffmpeg -type f | head -1 || true)
+          if [ -n "$FFMPEG" ]; then "$FFMPEG" -version | head -1; else echo "::warning::ffmpeg is not inside the app"; fi
+
+      - name: Create the DMG
+        run: |
+          VERSION=$(python -c "from branding import VERSION; print(VERSION)")
+          mkdir dmg-src
+          ditto "dist/$APP_NAME.app" "dmg-src/$APP_NAME.app"
+          ln -s /Applications dmg-src/Applications
+          DMG="YouTube-Video-Downloader-${VERSION}-macOS-${{ matrix.arch }}.dmg"
+          hdiutil create -volname "$APP_NAME" -srcfolder dmg-src -ov -format UDZO "$DMG"
+          shasum -a 256 "$DMG" > "$DMG.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: YouTube-Video-Downloader-macOS-${{ matrix.arch }}
+          path: |
+            YouTube-Video-Downloader-*.dmg
+            YouTube-Video-Downloader-*.dmg.sha256
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create release and upload files
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cat > notes.md << 'NOTES'
+          ## YouTube Video Downloader for macOS
+
+          1. Download the `.dmg` that matches your Mac: `arm64` for Apple Silicon (M1 or newer), `x86_64` for Intel. Check under Apple menu > About This Mac > Chip.
+          2. Open it and drag **YouTube Video Downloader** into **Applications**.
+          3. The app is not signed by Apple, so the first launch is blocked. Open the app once, then go to System Settings > Privacy & Security, scroll down and click **Open Anyway**.
+
+          Downloads are saved to `Movies/Sonica` by default. Only download videos you own or have permission to use.
+          NOTES
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "YouTube Video Downloader $GITHUB_REF_NAME" --notes-file notes.md
+          gh release upload "$GITHUB_REF_NAME" artifacts/* --clobber --repo "$GITHUB_REPOSITORY"
