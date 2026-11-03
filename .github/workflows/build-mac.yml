@@ -61,7 +61,7 @@ jobs:
               echo "::warning::Could not download ${tool}. The app will fall back to a Homebrew copy on the user's Mac."
             fi
           done
-          CF_VERSION=$(python -c "import json;print(json.load(open('vendor/cloudflared-release.json'))['version'])")
+          CF_VERSION=$(python -c "import json;print(json.load(open('vendor/cloudflared-release.json'))['version'])" 2>/dev/null || echo 2026.10.5)
           if curl -fsSL --retry 3 "https://github.com/cloudflare/cloudflared/releases/download/${CF_VERSION}/cloudflared-darwin-${{ matrix.cloudflared_arch }}.tgz" -o cloudflared.tgz \
              && tar -xzf cloudflared.tgz -C build-bin cloudflared; then
             chmod +x build-bin/cloudflared
@@ -72,10 +72,12 @@ jobs:
 
       - name: Make the app icon
         run: |
+          ICON=app-icon.png
+          [ -f "$ICON" ] || ICON=assets/app-icon.png
           mkdir Sonika.iconset
           for s in 16 32 128 256 512; do
-            sips -z $s $s assets/app-icon.png --out Sonika.iconset/icon_${s}x${s}.png
-            sips -z $((s*2)) $((s*2)) assets/app-icon.png --out Sonika.iconset/icon_${s}x${s}@2x.png
+            sips -z $s $s "$ICON" --out Sonika.iconset/icon_${s}x${s}.png
+            sips -z $((s*2)) $((s*2)) "$ICON" --out Sonika.iconset/icon_${s}x${s}@2x.png
           done
           iconutil -c icns Sonika.iconset -o Sonika.icns
 
