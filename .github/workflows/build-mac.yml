@@ -94,7 +94,11 @@ jobs:
         run: |
           # The background queue starts, finds nothing to do and exits by itself. This proves that
           # the frozen app can import everything it needs.
-          timeout 60 "dist/$APP_NAME.app/Contents/MacOS/Sonika" --queue
+          "dist/$APP_NAME.app/Contents/MacOS/Sonika" --queue &
+          PID=$!
+          for i in $(seq 1 60); do kill -0 $PID 2>/dev/null || break; sleep 1; done
+          if kill -0 $PID 2>/dev/null; then kill $PID; echo "::error::The app did not finish starting within 60 seconds"; exit 1; fi
+          wait $PID
           FFMPEG=$(find "dist/$APP_NAME.app" -name ffmpeg -type f | head -1 || true)
           if [ -n "$FFMPEG" ]; then "$FFMPEG" -version | head -1; else echo "::warning::ffmpeg is not inside the app"; fi
 
