@@ -9,7 +9,12 @@ version = re.search(r"VERSION\s*=\s*'([^']+)'", (src / 'branding.py').read_text(
 bin_dir = Path(os.environ.get('SONIKA_BIN_DIR', src / 'build-bin'))
 icon = os.environ.get('SONIKA_ICON')
 
-datas = [(str(src / 'README.md'), '.'), (str(src / 'assets'), 'assets')] + copy_metadata('mcp')
+datas = [(str(src / 'README.md'), '.')] + copy_metadata('mcp')
+# The app icon may sit in an assets/ folder or directly next to the code (flat upload). Either way it ends up in assets/ inside the app.
+if (src / 'assets').is_dir():
+    datas.append((str(src / 'assets'), 'assets'))
+else:
+    datas.append((str(src / 'app-icon.png'), 'assets'))
 # Helper tools (ffmpeg, ffprobe, node, cloudflared) are copied as plain files so PyInstaller leaves them untouched.
 if bin_dir.is_dir():
     datas += [(str(tool), 'bin') for tool in sorted(bin_dir.iterdir()) if tool.is_file()]
